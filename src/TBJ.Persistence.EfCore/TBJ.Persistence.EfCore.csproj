@@ -1,0 +1,66 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFrameworks>net8.0;net9.0;net10.0</TargetFrameworks>
+    <RootNamespace>TBJ.Persistence.EfCore</RootNamespace>
+    <AssemblyName>TBJ.Persistence.EfCore</AssemblyName>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <IsPackable>true</IsPackable>
+    <PackageId>TBJ.Persistence.EfCore</PackageId>
+    <Description>Generic Repository and Unit of Work pattern for Entity Framework Core. Provider-agnostic, supports multi-tenancy via IConnectionStringProvider.</Description>
+    <PackageTags>efcore;repository;unitofwork;persistence;tbj</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <MinVerTagPrefix>efcore/v</MinVerTagPrefix>
+  </PropertyGroup>
+
+  <!--
+    Each TFM uses its own EF Core major version + matching BulkExtensions.
+    VersionOverride bypasses Central Package Management for per-TFM versioning.
+    EF Core N.x.y targets netN.0 exclusively (starting from EF Core 9).
+    EF Core 8.x targets net8.0 and provides downlevel compatibility.
+  -->
+  <Choose>
+    <When Condition="'$(TargetFramework)' == 'net8.0'">
+      <ItemGroup>
+        <PackageReference Include="Microsoft.EntityFrameworkCore" VersionOverride="8.0.18" />
+        <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" VersionOverride="8.0.2" />
+        <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" VersionOverride="8.0.3" />
+        <PackageReference Include="EFCore.BulkExtensions" VersionOverride="8.0.0" />
+      </ItemGroup>
+    </When>
+    <When Condition="'$(TargetFramework)' == 'net9.0'">
+      <ItemGroup>
+        <PackageReference Include="Microsoft.EntityFrameworkCore" VersionOverride="9.0.6" />
+        <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" VersionOverride="9.0.6" />
+        <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" VersionOverride="9.0.6" />
+        <PackageReference Include="EFCore.BulkExtensions" VersionOverride="9.0.1" />
+      </ItemGroup>
+    </When>
+    <When Condition="'$(TargetFramework)' == 'net10.0'">
+      <ItemGroup>
+        <PackageReference Include="Microsoft.EntityFrameworkCore" VersionOverride="10.0.9" />
+        <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" VersionOverride="10.0.9" />
+        <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" VersionOverride="10.0.9" />
+        <PackageReference Include="EFCore.BulkExtensions" VersionOverride="10.0.1" />
+      </ItemGroup>
+    </When>
+  </Choose>
+
+  <!-- MinVer for NuGet package versioning via git tags -->
+  <ItemGroup>
+    <PackageReference Include="MinVer" PrivateAssets="all" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="TBJ.Persistence.EfCore.Tests" />
+    <InternalsVisibleTo Include="TBJ.Persistence.EfCore.IntegrationTests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,11 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/TBJ.Persistence.EfCore/TBJ.Persistence.EfCore.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/TBJ.Persistence.EfCore.Tests/TBJ.Persistence.EfCore.Tests.csproj" />
+  </Folder>
+  <Folder Name="/examples/">
+    <Project Path="examples/TBJ.Persistence.EfCore.IntegrationTests/TBJ.Persistence.EfCore.IntegrationTests.csproj" />
+  </Folder>
+</Solution>

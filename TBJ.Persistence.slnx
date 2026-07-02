@@ -7,5 +7,6 @@
   </Folder>
   <Folder Name="/examples/">
     <Project Path="examples/TBJ.Persistence.EfCore.IntegrationTests/TBJ.Persistence.EfCore.IntegrationTests.csproj" />
+    <Project Path="examples/TBJ.Persistence.EfCore.WebApiSample/TBJ.Persistence.EfCore.WebApiSample.csproj" />
   </Folder>
 </Solution>

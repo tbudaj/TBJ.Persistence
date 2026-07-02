@@ -1,38 +1,39 @@
 # TBJ.Persistence.EfCore
 
-Generic Repository and Unit of Work pattern built on top of Entity Framework Core.  
-Provider-agnostic — works with SQL Server, PostgreSQL (Npgsql), SQLite and any other EF Core provider.  
-Supports multi-tenancy via `IConnectionStringProvider`.
+Generyczny wzorzec Repository i Unit of Work zbudowany na Entity Framework Core.  
+Niezależny od dostawcy — działa z SQL Server, PostgreSQL (Npgsql), SQLite i każdym innym dostawcą EF Core.  
+Obsługuje multi-tenancy przez `IConnectionStringProvider`.
 
-## Table of contents
+## Spis treści
 
-1. [Installation](#installation)
-2. [Architecture overview](#architecture-overview)
-3. [Quick start](#quick-start)
-4. [DI registration](#di-registration)
-   - [Advanced scenario — delegate with IConnectionStringProvider](#advanced-scenario--delegate-with-iconnectionstringprovider)
-   - [Simple scenario — connection string from IConfiguration](#simple-scenario--connection-string-from-iconfiguration)
-5. [IGenericRepository API reference](#igenericrepository-api-reference)
-6. [IGenericUnitOfWork API reference](#igenericunitofwork-api-reference)
-7. [Bulk operations](#bulk-operations)
-8. [Resilient transactions](#resilient-transactions)
-9. [Multi-tenancy](#multi-tenancy)
-10. [Testing](#testing)
-11. [Service lifetimes](#service-lifetimes)
-12. [Versioning and NuGet release](#versioning-and-nuget-release)
+1. [Instalacja](#instalacja)
+2. [Przegląd architektury](#przegl%C4%85d-architektury)
+3. [Jak to działa — kluczowy mechanizm](#jak-to-dzia%C5%82a--kluczowy-mechanizm)
+4. [Szybki start](#szybki-start)
+5. [Rejestracja DI](#rejestracja-di)
+   - [Scenariusz zaawansowany — delegat z IConnectionStringProvider](#scenariusz-zaawansowany--delegat-z-iconnectionstringprovider)
+   - [Scenariusz prosty — connection string z IConfiguration](#scenariusz-prosty--connection-string-z-iconfiguration)
+6. [IGenericRepository — API](#igenericrepository--api)
+7. [IGenericUnitOfWork — API](#igenericunitofwork--api)
+8. [Operacje masowe (bulk)](#operacje-masowe-bulk)
+9. [Odporne transakcje](#odporne-transakcje)
+10. [Multi-tenancy](#multi-tenancy)
+11. [Testowanie](#testowanie)
+12. [Czasy życia usług](#czasy-%C5%BCycia-us%C5%82ug)
+13. [Wersjonowanie i publikacja NuGet](#wersjonowanie-i-publikacja-nuget)
 
 ---
 
-## Installation
+## Instalacja
 
 ```bash
 dotnet add package TBJ.Persistence.EfCore
 ```
 
-> The package targets `net8.0`, `net9.0` and `net10.0`.  
-> It has **no dependency on a specific EF Core provider** — add the provider package separately.
+> Paczka celuje w `net8.0`, `net9.0` i `net10.0`.  
+> **Nie ma zależności od konkretnego dostawcy EF Core** — dodaj paczkę dostawcy osobno.
 
-Provider examples:
+Przykłady dostawców:
 
 ```bash
 # SQL Server
@@ -41,60 +42,155 @@ dotnet add package Microsoft.EntityFrameworkCore.SqlServer
 # PostgreSQL
 dotnet add package Npgsql.EntityFrameworkCore.PostgreSQL
 
-# SQLite (commonly used for tests/dev)
+# SQLite (najczęściej w testach i lokalnym dev)
 dotnet add package Microsoft.EntityFrameworkCore.Sqlite
 ```
 
 ---
 
-## Architecture overview
+## Przegląd architektury
 
 ```
-IGenericRepository<TEntity>          — CRUD, bulk, composable IQueryable
-IGenericUnitOfWork                   — repository cache, transactions, SaveChanges
-IConnectionStringProvider<TDbContext>— per-request connection string (multi-tenancy)
+IGenericRepository<TEntity>            — CRUD, bulk, komponowalny IQueryable
+IGenericUnitOfWork                     — cache repozytoriów, transakcje, SaveChanges
+IConnectionStringProvider<TDbContext>  — connection string per-request (multi-tenancy)
 
-BaseDbContext                        — abstract DbContext with logging + auto-configuration discovery
-GenericRepository<TEntity>           — sealed implementation of IGenericRepository
-GenericUnitOfWork<TDbContext>        — abstract implementation of IGenericUnitOfWork
+BaseDbContext                          — abstrakcyjny DbContext z logowaniem + auto-odkrywanie konfiguracji
+GenericRepository<TEntity>             — sealed implementacja IGenericRepository
+GenericUnitOfWork<TDbContext>          — abstrakcyjna implementacja IGenericUnitOfWork
 PersistenceServiceCollectionExtensions — AddPersistence / AddUnitOfWork
 ```
 
-**Key design decisions:**
+**Kluczowe decyzje projektowe:**
 
-| Decision | Rationale |
+| Decyzja | Uzasadnienie |
 |---|---|
-| No default lazy loading | Use explicit `.Include()` — prevents N+1 surprises |
-| `AsNoTracking` by default | Read-only queries avoid change tracker overhead |
-| Auto PK ordering on paging | Deterministic results without requiring explicit `OrderBy` |
-| No default `Take` | Prevents breaking composable LINQ (joins, sub-queries) |
-| Repository cache per UoW instance | Thread-safe `ConcurrentDictionary` — single repository per entity type per scope |
-| Abstract `GenericUnitOfWork` | Consumers inherit and add domain-specific methods; DI registers the concrete type |
+| Brak domyślnego lazy loading | Jawne `.Include()` — eliminuje niezauważony N+1 |
+| `AsNoTracking` domyślnie | Zapytania tylko-do-odczytu bez narzutu change trackera |
+| Automatyczne sortowanie po PK przy stronicowaniu | Deterministyczne wyniki bez wymuszania jawnego `OrderBy` |
+| Brak domyślnego `Take` | Nie psuje kompozycji LINQ (joiny, podzapytania) |
+| Cache repozytoriów per instancja UoW | Wątkobezpieczny `ConcurrentDictionary` — jeden repository per typ encji per scope |
+| `GenericUnitOfWork` jest abstrakcyjny | Konsumenci dziedziczą i dodają metody domenowe; DI rejestruje konkretny typ |
+| **Brak wymaganych `DbSet<>` w kontekście** | Repozytoria tworzone dynamicznie przez `dbContext.Set<TEntity>()` — zero boilerplate |
 
 ---
 
-## Quick start
+## Jak to działa — kluczowy mechanizm
 
-### 1. Define your DbContext
+To jest najważniejsza rzecz do zrozumienia w tej bibliotece.
+
+### Żadnych DbSet<> — encje przez konfiguracje
+
+Standardowe podejście EF Core wymaga deklarowania właściwości `DbSet<T>` w klasie kontekstu dla każdej encji:
+
+```csharp
+// ❌ Tradycyjne podejście — boilerplate, który ta biblioteka eliminuje
+public class AppDbContext : DbContext
+{
+    public DbSet<Order> Orders { get; set; }
+    public DbSet<OrderItem> OrderItems { get; set; }
+    public DbSet<Product> Products { get; set; }
+    public DbSet<Customer> Customers { get; set; }
+    // ... każda nowa encja = nowa właściwość tutaj
+}
+```
+
+W `TBJ.Persistence.EfCore` działa to inaczej:
+
+```csharp
+// ✅ Podejście biblioteki — zero właściwości DbSet<>
+public class AppDbContext : BaseDbContext
+{
+    public AppDbContext(DbContextOptions<AppDbContext> options) : base(options) { }
+    // Koniec — żadnych DbSet<>, żadnych OnModelCreating
+}
+```
+
+### Jak encje trafiają do modelu?
+
+`BaseDbContext.OnModelCreating` automatycznie wywołuje `ApplyConfigurationsFromAssembly(GetType().Assembly)`.  
+Oznacza to: **każda klasa implementująca `IEntityTypeConfiguration<TEntity>` w Twoim assembly jest automatycznie odkrywana i rejestruje encję w modelu EF**.
+
+```csharp
+// Zdefiniuj konfigurację — to wystarczy żeby encja istniała w modelu
+public class OrderConfiguration : IEntityTypeConfiguration<Order>
+{
+    public void Configure(EntityTypeBuilder<Order> builder)
+    {
+        builder.HasKey(o => o.Id);
+        builder.Property(o => o.Total).HasColumnType("decimal(18,2)");
+        // ... cała konfiguracja fluent API tutaj
+    }
+}
+```
+
+### Jak repozytorium trafia do encji?
+
+`GenericUnitOfWork.Repository<TEntity>()` wykonuje trzy rzeczy:
+
+1. Sprawdza `dbContext.Model.FindEntityType(typeof(TEntity))` — fail-fast jeśli encja nie istnieje w modelu
+2. Woła `dbContext.Set<TEntity>()` — EF Core dynamicznie zwraca `DbSet<TEntity>` dla każdej encji w modelu
+3. Cachuje repozytorium w `ConcurrentDictionary<Type, object>` — jeden repozytorium per typ per scope
+
+```
+IEntityTypeConfiguration<Order>  ──▶  ApplyConfigurationsFromAssembly
+                                              │
+                                              ▼
+                                   Model EF Core wie o Order
+                                              │
+                                              ▼
+uow.Repository<Order>()  ──▶  dbContext.Set<Order>()  ──▶  GenericRepository<Order>
+```
+
+**Wynik:** Dodanie nowej encji do projektu wymaga tylko jednej klasy `IEntityTypeConfiguration<TEntity>`. Kontekst i UoW nie wymagają żadnych zmian.
+
+---
+
+## Szybki start
+
+### 1. Zdefiniuj encję i jej konfigurację
+
+```csharp
+// Encja domenowa — zwykły POCO
+public class Order
+{
+    public int Id { get; set; }
+    public decimal Total { get; set; }
+    public DateTime CreatedAt { get; set; }
+}
+
+// Konfiguracja EF Core — to jest jedyne co trzeba napisać żeby encja była w modelu
+public class OrderConfiguration : IEntityTypeConfiguration<Order>
+{
+    public void Configure(EntityTypeBuilder<Order> builder)
+    {
+        builder.HasKey(o => o.Id);
+        builder.Property(o => o.Total).HasColumnType("decimal(18,2)");
+        builder.Property(o => o.CreatedAt).IsRequired();
+    }
+}
+```
+
+### 2. Zdefiniuj DbContext — bez DbSet<>
 
 ```csharp
 using TBJ.Persistence.EfCore.Implementation;
 
+// Cała klasa kontekstu — żadnych właściwości DbSet<>, żadnych nadpisań OnModelCreating
 public class AppDbContext : BaseDbContext
 {
-    public DbSet<Order> Orders => Set<Order>();
-
     public AppDbContext(DbContextOptions<AppDbContext> options) : base(options) { }
 }
 ```
 
-Entity configurations are auto-discovered from the assembly via `ApplyConfigurationsFromAssembly`.
+`BaseDbContext` automatycznie odkrywa wszystkie `IEntityTypeConfiguration<T>` z tego assembly przez `ApplyConfigurationsFromAssembly`.
 
-### 2. Create your UnitOfWork
+### 3. Utwórz UnitOfWork — jeden konstruktor
 
 ```csharp
 using TBJ.Persistence.EfCore.Implementation;
 
+// Cała klasa UoW — tylko konstruktor przekazujący do bazy
 public class AppUnitOfWork : GenericUnitOfWork<AppDbContext>
 {
     public AppUnitOfWork(AppDbContext dbContext, ILoggerFactory? loggerFactory = null)
@@ -102,12 +198,10 @@ public class AppUnitOfWork : GenericUnitOfWork<AppDbContext>
 }
 ```
 
-That's it — no boilerplate repository classes needed.
-
-### 3. Register in DI and use
+### 4. Zarejestruj w DI i użyj
 
 ```csharp
-// Program.cs
+// Program.cs — jedna linia rejestracji
 builder.Services.AddPersistence<AppDbContext, AppUnitOfWork>(
     builder.Configuration,
     "Default",
@@ -115,37 +209,36 @@ builder.Services.AddPersistence<AppDbContext, AppUnitOfWork>(
 ```
 
 ```csharp
-// Service class
+// Klasa serwisu — Repository<T> dostępne dla każdej encji z konfiguracją
 public class OrderService(IGenericUnitOfWork uow)
 {
     public async Task<Order?> GetOrderAsync(int id)
-    {
-        var repo = uow.Repository<Order>();
-        return await repo.FindAsync(id);
-    }
+        => await uow.Repository<Order>().FindAsync(id);
 
     public async Task CreateOrderAsync(Order order)
     {
-        var repo = uow.Repository<Order>();
-        repo.Insert(order);
+        uow.Repository<Order>().Insert(order);
         await uow.SaveChangesAsync();
     }
 }
 ```
 
+> **Kluczowe:** `uow.Repository<Order>()` działa bez żadnej wcześniejszej rejestracji `Order` w UoW ani w DbContext.  
+> Wystarczy, że w assembly istnieje `OrderConfiguration : IEntityTypeConfiguration<Order>`.
+
 ---
 
-## DI registration
+## Rejestracja DI
 
-### Advanced scenario — delegate with IConnectionStringProvider
+### Scenariusz zaawansowany — delegat z IConnectionStringProvider
 
-Use this overload when the connection string must be resolved per-request (e.g. multi-tenant applications).
+Użyj tego przeciążenia gdy connection string musi być resolwowany per-request (np. aplikacje multi-tenant).
 
 ```csharp
-// Register your custom provider
+// Zarejestruj własnego dostawcę
 builder.Services.AddScoped<IConnectionStringProvider<AppDbContext>, TenantConnectionStringProvider>();
 
-// Register persistence — the delegate receives IServiceProvider
+// Zarejestruj persystencję — delegat otrzymuje IServiceProvider
 builder.Services.AddPersistence<AppDbContext, AppUnitOfWork>((serviceProvider, opt) =>
 {
     var provider = serviceProvider.GetRequiredService<IConnectionStringProvider<AppDbContext>>();
@@ -153,7 +246,7 @@ builder.Services.AddPersistence<AppDbContext, AppUnitOfWork>((serviceProvider, o
 });
 ```
 
-**`IConnectionStringProvider` implementation example:**
+**Przykładowa implementacja `IConnectionStringProvider`:**
 
 ```csharp
 public class TenantConnectionStringProvider : IConnectionStringProvider<AppDbContext>
@@ -172,16 +265,16 @@ public class TenantConnectionStringProvider : IConnectionStringProvider<AppDbCon
     public string GetConnectionString()
     {
         var tenantId = httpContextAccessor.HttpContext?.User.FindFirstValue("tenant_id")
-            ?? throw new InvalidOperationException("Tenant identifier not found in JWT.");
+            ?? throw new InvalidOperationException("Identyfikator tenanta nie znaleziony w JWT.");
 
         return tenantRepository.GetConnectionString(tenantId);
     }
 }
 ```
 
-### Simple scenario — connection string from IConfiguration
+### Scenariusz prosty — connection string z IConfiguration
 
-Use this overload for single-tenant applications or when the connection string is static.
+Użyj tego przeciążenia dla aplikacji single-tenant lub gdy connection string jest statyczny.
 
 ```json
 // appsettings.json
@@ -200,7 +293,7 @@ builder.Services.AddPersistence<AppDbContext, AppUnitOfWork>(
     (opt, connectionString) => opt.UseSqlServer(connectionString));
 ```
 
-If you need to register the UoW separately (DbContext already registered elsewhere):
+Jeśli DbContext jest już zarejestrowany osobno — rejestruj tylko UoW:
 
 ```csharp
 services.AddUnitOfWork<AppUnitOfWork>();
@@ -208,85 +301,88 @@ services.AddUnitOfWork<AppUnitOfWork>();
 
 ---
 
-## IGenericRepository API reference
+## IGenericRepository — API
 
-| Method | Description |
+| Metoda | Opis |
 |---|---|
-| `AsQueryable(filter, orderBy, include, skip, take, tracking)` | Builds a composable `IQueryable<TEntity>`. No materialization. |
-| `GetAsync(filter, orderBy, include, skip, take, tracking, ct)` | Materializes to `List<TEntity>`. |
-| `FindAsync(params object[] ids)` | Finds by primary key. Supports composite keys. |
-| `ExistsAsync(predicate, ct)` | Returns `true` if any entity matches. |
-| `CountAsync(predicate, ct)` | Returns count of matching entities. |
-| `FirstOrDefaultAsync(predicate, orderBy, include, tracking, ct)` | Returns first matching entity or null. |
-| `Insert(entity)` | Marks entity for insertion. Requires `SaveChangesAsync`. |
-| `Insert(IEnumerable)` | Marks collection for insertion. Requires `SaveChangesAsync`. |
-| `InsertRangeAsync(entities, bulkConfig, ct)` | Bulk insert via EFCore.BulkExtensions. Immediate write. |
-| `InsertOrUpdateAsync(entity, ct)` | Insert or update by PK. N+1 for collections. |
-| `InsertOrUpdateAsync(IEnumerable, ct)` | Insert or update collection by PK. N+1. |
-| `InsertNewAsync(IEnumerable, ct)` | Inserts only new entities by PK. N+1. |
-| `Update(entity)` | Marks entity for update. Requires `SaveChangesAsync`. |
-| `Update(IEnumerable)` | Marks collection for update. Requires `SaveChangesAsync`. |
-| `UpdateRangeAsync(where, setters, ct)` | Bulk update via `ExecuteUpdateAsync`. Immediate write. |
-| `Delete(entity)` | Marks entity for deletion. Requires `SaveChangesAsync`. |
-| `Delete(IEnumerable)` | Marks collection for deletion. Requires `SaveChangesAsync`. |
-| `DeleteRangeAsync(where, ct)` | Bulk delete via `ExecuteDeleteAsync`. Immediate write. |
-| `Attach(entity)` | Attaches entity to EF context for tracking. |
-| `Detach(entity)` | Detaches entity from EF context. |
+| `AsQueryable(filter, orderBy, include, skip, take, tracking)` | Buduje komponowalny `IQueryable<TEntity>`. Brak materializacji. |
+| `GetAsync(filter, orderBy, include, skip, take, tracking, ct)` | Materializuje do `List<TEntity>`. |
+| `FindAsync(params object[] ids)` | Szuka po kluczu głównym. Obsługuje klucze złożone. |
+| `ExistsAsync(predicate, ct)` | Zwraca `true` gdy jakaś encja spełnia predykat. |
+| `CountAsync(predicate, ct)` | Zlicza encje spełniające predykat. |
+| `FirstOrDefaultAsync(predicate, orderBy, include, tracking, ct)` | Pierwsza pasująca encja lub null. |
+| `Insert(entity)` | Oznacza encję do wstawienia. Wymaga `SaveChangesAsync`. |
+| `Insert(IEnumerable)` | Oznacza kolekcję do wstawienia. Wymaga `SaveChangesAsync`. |
+| `InsertRangeAsync(entities, bulkConfig, ct)` | Masowe wstawianie przez EFCore.BulkExtensions. Natychmiastowy zapis. |
+| `InsertOrUpdateAsync(entity, ct)` | Wstaw lub aktualizuj po PK. N+1 dla kolekcji. |
+| `InsertOrUpdateAsync(IEnumerable, ct)` | Wstaw lub aktualizuj kolekcję po PK. N+1. |
+| `InsertNewAsync(IEnumerable, ct)` | Wstawia wyłącznie nowe encje po PK. N+1. |
+| `Update(entity)` | Oznacza encję do aktualizacji. Wymaga `SaveChangesAsync`. |
+| `Update(IEnumerable)` | Oznacza kolekcję do aktualizacji. Wymaga `SaveChangesAsync`. |
+| `UpdateRangeAsync(where, setters, ct)` | Masowa aktualizacja przez `ExecuteUpdateAsync`. Natychmiastowy zapis. |
+| `Delete(entity)` | Oznacza encję do usunięcia. Wymaga `SaveChangesAsync`. |
+| `Delete(IEnumerable)` | Oznacza kolekcję do usunięcia. Wymaga `SaveChangesAsync`. |
+| `DeleteRangeAsync(where, ct)` | Masowe usuwanie przez `ExecuteDeleteAsync`. Natychmiastowy zapis. |
+| `Attach(entity)` | Dołącza encję do kontekstu EF (włącza tracking). |
+| `Detach(entity)` | Odłącza encję od kontekstu EF. |
 
 ---
 
-## IGenericUnitOfWork API reference
+## IGenericUnitOfWork — API
 
-| Method / Property | Description |
+| Metoda / właściwość | Opis |
 |---|---|
-| `Context` | Access to the underlying `BaseDbContext`. |
-| `Repository<TEntity>()` | Gets or creates a cached repository for the entity type. |
-| `SaveChangesAsync(ct)` | Saves tracked changes. Returns number of saved entities. |
-| `BeginTransactionAsync(ct)` | Starts a database transaction. Idempotent. |
-| `CommitTransactionAsync(ct)` | Commits the active transaction. No-op if none. |
-| `RollbackTransactionAsync(ct)` | Rolls back the active transaction. No-op if none. |
-| `ExecuteSqlCommandAsync(query, ct)` | Executes raw SQL command. Returns affected rows. |
-| `FromSql<TResult>(query)` | Composable `IQueryable` from raw SQL. |
-| `ReloadAsync<TEntity>(entity, ct)` | Reloads entity from database. |
-| `ExecuteResilientTransactionAsync(action, ct)` | Resilient retry transaction (ExecutionStrategy). |
-| `ExecuteResilientTransactionAsync<T>(action, ct)` | Resilient retry transaction returning a result. |
-| `ClearChangeTracker()` | Detaches all tracked entities. |
-| `Dispose()` / `DisposeAsync()` | Releases DbContext and active transaction. |
+| `Context` | Dostęp do bazowego `BaseDbContext`. |
+| `Repository<TEntity>()` | Pobiera lub tworzy cachowane repozytorium dla typu encji. |
+| `SaveChangesAsync(ct)` | Zapisuje śledzone zmiany. Zwraca liczbę zapisanych encji. |
+| `BeginTransactionAsync(ct)` | Rozpoczyna transakcję bazodanową. Idempotentna. |
+| `CommitTransactionAsync(ct)` | Zatwierdza aktywną transakcję. Brak operacji gdy brak transakcji. |
+| `RollbackTransactionAsync(ct)` | Wycofuje aktywną transakcję. Brak operacji gdy brak transakcji. |
+| `ExecuteSqlCommandAsync(query, ct)` | Wykonuje surowe polecenie SQL. Zwraca liczbę dotkniętych wierszy. |
+| `FromSql<TResult>(query)` | Komponowalny `IQueryable` z surowego SQL. |
+| `ReloadAsync<TEntity>(entity, ct)` | Przeładowuje encję z bazy danych. |
+| `ExecuteResilientTransactionAsync(action, ct)` | Odporna transakcja z automatycznym ponawianiem (ExecutionStrategy). |
+| `ExecuteResilientTransactionAsync<T>(action, ct)` | Odporna transakcja zwracająca wynik. |
+| `ClearChangeTracker()` | Odłącza wszystkie śledzone encje. |
+| `Dispose()` / `DisposeAsync()` | Zwalnia DbContext i aktywną transakcję. |
 
 ---
 
-## Bulk operations
+## Operacje masowe (bulk)
 
-`InsertRangeAsync` uses **EFCore.BulkExtensions** to insert large data sets efficiently, bypassing the EF change tracker.
+`InsertRangeAsync` używa **EFCore.BulkExtensions** do efektywnego wstawiania dużych zbiorów danych z pominięciem change trackera.
 
 ```csharp
+var repo = uow.Repository<Product>();
+
 var products = Enumerable.Range(1, 10_000)
     .Select(i => new Product { Id = i, Name = $"P{i}", Price = i });
 
-var repo = uow.Repository<Product>();
 await repo.InsertRangeAsync(products);
-// No SaveChangesAsync needed — data is already in the database
+// Brak SaveChangesAsync — dane są już w bazie danych
 ```
 
-For bulk updates and deletes, use `UpdateRangeAsync` and `DeleteRangeAsync` which delegate to EF Core's native `ExecuteUpdateAsync`/`ExecuteDeleteAsync`:
+`UpdateRangeAsync` i `DeleteRangeAsync` delegują do natywnych metod EF Core `ExecuteUpdateAsync`/`ExecuteDeleteAsync`:
 
 ```csharp
-// Deactivate all products in category "Sale"
+// Dezaktywuj wszystkie produkty w kategorii "Sale"
 await repo.UpdateRangeAsync(
     p => p.Category == "Sale",
     s => s.SetProperty(p => p.IsActive, false));
 
-// Remove all inactive products
+// Usuń wszystkie nieaktywne produkty
 await repo.DeleteRangeAsync(p => !p.IsActive);
 ```
 
-> **Note:** Bulk operations bypass the change tracker and do not trigger EF Core interceptors or `SaveChanges` events.
+> **Uwaga:** Operacje masowe omijają change tracker i nie wywołują interceptorów EF Core ani zdarzeń `SaveChanges`.
+
+> **EF Core 10:** Sygnatura `UpdateRangeAsync` różni się między wersjami EF Core — biblioteka używa `#if NET10_0_OR_GREATER` żeby obsłużyć obie sygnatury (`Action<UpdateSettersBuilder<T>>` w EF10, `Expression<Func<SetPropertyCalls<T>, SetPropertyCalls<T>>>` w EF8/9).
 
 ---
 
-## Resilient transactions
+## Odporne transakcje
 
-Use `ExecuteResilientTransactionAsync` to automatically retry transient failures using EF Core's `ExecutionStrategy` (enabled by resilience-aware providers such as `UseSqlServer` with `EnableRetryOnFailure`).
+Użyj `ExecuteResilientTransactionAsync` do automatycznego ponawiania błędów przejściowych przez `ExecutionStrategy` EF Core (dostępna dla dostawców obsługujących retry, np. `UseSqlServer` z `EnableRetryOnFailure`).
 
 ```csharp
 await uow.ExecuteResilientTransactionAsync(async (u, ct) =>
@@ -294,10 +390,10 @@ await uow.ExecuteResilientTransactionAsync(async (u, ct) =>
     var repo = u.Repository<Order>();
     repo.Insert(new Order { /* ... */ });
 });
-// SaveChangesAsync and CommitTransactionAsync are called automatically
+// SaveChangesAsync i CommitTransactionAsync wywoływane automatycznie
 ```
 
-Returning a value:
+Wariant zwracający wartość:
 
 ```csharp
 var orderId = await uow.ExecuteResilientTransactionAsync(async (u, ct) =>
@@ -309,23 +405,23 @@ var orderId = await uow.ExecuteResilientTransactionAsync(async (u, ct) =>
 });
 ```
 
-> **Important:** The action must be idempotent — it may be retried multiple times. The change tracker is cleared before each attempt via `ClearChangeTracker()`.
+> **Ważne:** Akcja musi być idempotentna — może być ponawiana wielokrotnie. Change tracker jest czyszczony przed każdą próbą przez `ClearChangeTracker()`.
 
 ---
 
 ## Multi-tenancy
 
-Register a custom `IConnectionStringProvider<TDbContext>` and use the delegate overload of `AddPersistence`:
+Zarejestruj własny `IConnectionStringProvider<TDbContext>` i użyj przeciążenia delegatowego `AddPersistence`:
 
 ```csharp
-// 1. Implement IConnectionStringProvider<TDbContext>
+// 1. Zaimplementuj IConnectionStringProvider<TDbContext>
 public class TenantProvider : IConnectionStringProvider<AppDbContext>
 {
-    // ... resolve connection string from JWT / cache / database
-    public string GetConnectionString() => /* per-tenant connection string */;
+    // ... resolwuj connection string z JWT / cache / bazy danych
+    public string GetConnectionString() => /* connection string per-tenant */;
 }
 
-// 2. Register
+// 2. Zarejestruj
 builder.Services.AddScoped<IConnectionStringProvider<AppDbContext>, TenantProvider>();
 builder.Services.AddPersistence<AppDbContext, AppUnitOfWork>((sp, opt) =>
 {
@@ -334,22 +430,27 @@ builder.Services.AddPersistence<AppDbContext, AppUnitOfWork>((sp, opt) =>
 });
 ```
 
-The `IConnectionStringProvider` interface is intentionally minimal — you control all tenant-resolution logic.
+Interfejs `IConnectionStringProvider` jest celowo minimalny — kontrolujesz całą logikę resolwowania tenanta.
 
 ---
 
-## Testing
+## Testowanie
 
-### Unit tests — EF Core InMemory
+### Testy jednostkowe — EF Core InMemory
+
+Nie potrzebujesz żadnej bazy danych — InMemory provider wystarczy do testowania logiki repozytorium.
 
 ```csharp
+// Kontekst bez DbSet<> — wystarczy konfiguracja encji w assembly
 var options = new DbContextOptionsBuilder<AppDbContext>()
     .UseInMemoryDatabase(Guid.NewGuid().ToString())
+    .ConfigureWarnings(w => w.Ignore(InMemoryEventId.TransactionIgnoredWarning))
     .Options;
 
 using var ctx = new AppDbContext(options);
 using var uow = new AppUnitOfWork(ctx);
 
+// Repository<Order> dostępne bo OrderConfiguration istnieje w assembly
 var repo = uow.Repository<Order>();
 repo.Insert(new Order { Id = 1, Total = 100m });
 await uow.SaveChangesAsync();
@@ -358,7 +459,11 @@ var found = await repo.FindAsync(1);
 Assert.NotNull(found);
 ```
 
-### Integration tests — SQLite in-memory
+> **Ograniczenie InMemory:** Dostawca InMemory nie obsługuje `ExecuteUpdateAsync` / `ExecuteDeleteAsync` (metody `UpdateRangeAsync`/`DeleteRangeAsync`). Dla tych operacji używaj testów integracyjnych z SQLite.
+
+### Testy integracyjne — SQLite in-memory
+
+SQLite in-memory uruchamia prawdziwy silnik SQL bez wymagań serwerowych — idealny do testowania operacji masowych i transakcji.
 
 ```csharp
 using var connection = new SqliteConnection("DataSource=:memory:");
@@ -369,40 +474,48 @@ var options = new DbContextOptionsBuilder<AppDbContext>()
     .Options;
 
 using var ctx = new AppDbContext(options);
-ctx.Database.EnsureCreated();
-
+ctx.Database.EnsureCreated(); // tworzy schemat — encje odkryte przez IEntityTypeConfiguration<T>
 using var uow = new AppUnitOfWork(ctx);
-// ... run tests with real SQL engine
+
+var repo = uow.Repository<Order>();
+repo.Insert(new Order { Id = 1, Total = 50m });
+await uow.SaveChangesAsync();
+
+// Operacje masowe działają z SQLite
+await repo.DeleteRangeAsync(o => o.Total < 100m);
+Assert.Equal(0, await repo.CountAsync());
 ```
 
-> SQLite in-memory supports **real transactions** (`BeginTransaction` / `Rollback`) — unlike the InMemory provider.
+---
+
+## Czasy życia usług
+
+| Usługa | Domyślny czas życia | Powód |
+|---|---|---|
+| `TDbContext` | Scoped | Jeden DbContext per HTTP request — izolacja change trackera |
+| `TUnitOfWork` | Scoped | Współdzielony UoW per request — spójny cache repozytoriów |
+| `IGenericUnitOfWork` | Scoped | Alias na `TUnitOfWork` w tym samym scope |
+| `IConnectionStringProvider<TDbContext>` | Scoped | Resolwowanie connection stringa per-request dla multi-tenancy |
+
+`AddPersistence` i `AddUnitOfWork` przyjmują opcjonalne parametry `contextLifetime` i `optionsLifetime` do zmiany tych domyślnych wartości.
 
 ---
 
-## Service lifetimes
+## Wersjonowanie i publikacja NuGet
 
-| Service | Lifetime |
-|---|---|
-| `TDbContext` (your DbContext) | `Scoped` (default) |
-| `TUnitOfWork` (your UoW) | `Scoped` |
-| `IGenericUnitOfWork` | `Scoped` (same instance as concrete UoW) |
-| `IConnectionStringProvider<TDbContext>` | `Scoped` (recommended — one per request) |
-| `GenericRepository<TEntity>` | Created and cached per UoW instance |
-
----
-
-## Versioning and NuGet release
-
-The package version is managed by **MinVer** using git tags.  
-Create a release tag to trigger the CI/CD release workflow:
+Projekt używa **MinVer** do automatycznego wersjonowania przez tagi Git:
 
 ```bash
-git tag efcore/v1.0.0
-git push origin efcore/v1.0.0
+# Utwórz tag wersji — pipeline GitHub Actions publikuje automatycznie
+git tag v1.0.0
+git push origin v1.0.0
 ```
 
-The `release.yml` workflow will:
-1. Build and pack the NuGet package
-2. Push to **NuGet.org**
-3. Push to **GitHub Packages**
-4. Create a GitHub Release with auto-generated notes
+Przepływ publikacji:
+
+1. Tag `v*` uruchamia workflow `release.yml`
+2. Build + testy dla `net8.0`, `net9.0`, `net10.0`
+3. `dotnet pack` generuje `.nupkg`
+4. Publikacja na NuGet.org i GitHub Packages
+
+> Dostęp do NuGet.org wymaga ustawienia sekretu `NUGET_API_KEY` w ustawieniach repozytorium GitHub.

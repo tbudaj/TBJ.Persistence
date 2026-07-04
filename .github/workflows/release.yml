@@ -52,3 +52,15 @@ jobs:
         with:
           files: ./artifacts/*.nupkg
           generate_release_notes: true
+
+      - name: Create release branch
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PAT || secrets.GITHUB_TOKEN }}
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          prefix="${tag%%/v*}"
+          version="${tag#*/v}"
+          branch="release/${prefix}/${version}"
+          echo "Creating release branch: $branch"
+          gh api "repos/${{ github.repository }}/git/refs" -f ref="refs/heads/$branch" -f sha="${{ github.sha }}"
